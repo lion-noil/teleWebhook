@@ -1,7 +1,8 @@
 import os, json, time, uuid, asyncio
 from collections import defaultdict, deque
 from typing import Dict, Any, Optional, Set
-
+from dotenv import load_dotenv
+load_dotenv()
 from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocketDisconnect, Query
 import httpx
 
