@@ -1,5 +1,13 @@
-fastapi
-uvicorn
-gunicorn
-redis
-python-dotenv
+# FastAPI + 서버 런타임
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.30,<1.0
+
+# 네트워킹
+httpx>=0.27,<1.0
+websockets>=12,<13
+
+# 환경변수 로딩(선택이지만 편의)
+python-dotenv>=1.0,<2.0
+
+# FastAPI v2 계열 의존
+pydantic>=2.6,<3.0

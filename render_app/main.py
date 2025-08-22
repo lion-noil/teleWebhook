@@ -3,7 +3,6 @@ from collections import defaultdict, deque
 from typing import Dict, Any, Optional, Set
 
 from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocketDisconnect, Query
-from fastapi.responses import JSONResponse
 import httpx
 
 # ─────────────────────────────────────────────────────────────────────
