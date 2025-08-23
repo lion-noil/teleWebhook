@@ -151,10 +151,12 @@ async def tg_send_message(token: str, chat_id: int, text: str, reply_to_message_
 # Commands
 
 def parse_command(text: str) -> Optional[Dict[str, Any]]:
-    up = (text or "").strip().lower()
-    if up in ("/status", "status"):
-        return {"type": "STATUS_QUERY"}
-    return None
+    if not text:
+        return None
+    return {
+        "type": "TEXT_COMMAND",  # 그냥 모두 TEXT_COMMAND로 넘김
+        "raw_text": text,        # 실제 텍스트도 payload에 포함
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -290,7 +292,7 @@ async def telegram_webhook(
             "type": "task",
             "correlation_id": corr_id,
             "command": cmd["type"],
-            "payload": {},
+            "payload": {"text": cmd["raw_text"]},
         }))
         logger.info("ws.dispatch " + kv(tg_bot=name, target=target_bot_id, cmd=cmd["type"], corr_id=corr_id))
     except Exception as e:
