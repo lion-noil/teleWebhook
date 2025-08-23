@@ -20,8 +20,8 @@ import httpx
 #   }
 # ]
 BOTS_JSON = os.getenv("BOTS_JSON", "[]")
+RAW_BOTS = json.loads(BOTS_JSON)
 BOT_RESPONSE_TIMEOUT_SEC = int(os.getenv("BOT_RESPONSE_TIMEOUT_SEC", "5"))
-
 BOT_CONNECT_TOKENS = json.loads(os.getenv("BOT_CONNECT_TOKENS_JSON", "{}"))
 
 # ─────────────────────────────────────────────────────────────────────
@@ -41,6 +41,7 @@ for b in RAW_BOTS:
         "header_secret": b.get("header_secret") or "",
         "stale_seconds": int(b.get("stale_seconds") or 60),
         "allowed_chats": b.get("allowed_chats") or [],
+        "ws_bot_id": b.get("ws_bot_id") or None,   # ← 추가
     }
 
 app = FastAPI()
@@ -100,7 +101,16 @@ def parse_command(text: str) -> Optional[Dict[str, Any]]:
 # bot_id -> {"ws": WebSocket, "caps": set([...]), "waiters": {corr_id: {"future": fut, "token":..., "chat_id":..., "reply_to":...}}}
 bots_ws: Dict[str, Dict[str, Any]] = {}
 
-def choose_bot_for(cmd: Dict[str, Any]) -> Optional[str]:
+def choose_bot_for(cmd: Dict[str, Any], tg_bot_name: Optional[str] = None) -> Optional[str]:
+    # 1) 텔레그램 봇 → 고정 WS 봇 매핑이 있으면 우선 사용
+    if tg_bot_name:
+        mapped = BOTS.get(tg_bot_name, {}).get("ws_bot_id")
+        if mapped and mapped in bots_ws:
+            # 캡 능력도 확인(안맞으면 fallback)
+            if cmd["type"] in bots_ws[mapped].get("caps", set()):
+                return mapped
+
+    # 2) fallback: 캡으로 아무 WS 봇이나
     need = cmd["type"]
     for bot_id, info in bots_ws.items():
         if need in info.get("caps", set()):
@@ -185,7 +195,7 @@ async def telegram_webhook(
         return {"ok": True}
 
     # 4) 로컬 봇 라우팅 (STATUS_QUERY만 처리)
-    target_bot_id = choose_bot_for(cmd)
+    target_bot_id = choose_bot_for(cmd, tg_bot_name=name)  # ← 텔레그램 봇 이름 전달
     if not target_bot_id or target_bot_id not in bots_ws:
         await tg_send_message(cfg["token"], chat_id, "🤖 처리 가능한 로컬 봇이 오프라인입니다. 잠시 후 다시 시도해 주세요.", reply_to_message_id=message_id)
         return {"ok": True}
