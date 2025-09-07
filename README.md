@@ -14,7 +14,7 @@ $body = @{
   url                  = $WebhookUrl
   secret_token         = $HeaderSecret
   drop_pending_updates = $true
-  allowed_updates      = @("message","edited_message","channel_post","edited_channel_post")
+  allowed_updates      = @("message")
 } | ConvertTo-Json -Compress
 
 Invoke-RestMethod -Uri "https://api.telegram.org/bot$Token/setWebhook" `

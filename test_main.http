@@ -1,6 +1,11 @@
+@token = {{token}}            // 환경 파일에서 불러오거나 여기 직접 기입
+@name = Noil1-bot
+@pathSecret = p1-secret
+@headerSecret = h1-secret
+@publicBase = https://telewebhook.onrender.com
 # Test your FastAPI endpoints
 
-GET http://127.0.0.1:8000/
+GET https://telewebhook.onrender.com/healthz
 Accept: application/json
 
 ###
@@ -8,4 +13,3 @@ Accept: application/json
 GET http://127.0.0.1:8000/hello/User
 Accept: application/json
 
-###

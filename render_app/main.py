@@ -1,3 +1,10 @@
+# telewebhook/main.py
+# Tokenless telewebhook:
+# - Receives Telegram webhook updates
+# - Forwards {text, tg_bot_name} over local WS to local_ws_bridge
+# - Returns Telegram Bot API call (sendMessage) in the webhook HTTP response (no bot token needed)
+# - WS authentication uses BOT_CONNECT_TOKENS_JSON / BOT_CONNECT_TOKENS_FILE
+
 import os
 import json
 import time
@@ -5,13 +12,12 @@ import uuid
 import asyncio
 import logging
 from collections import defaultdict, deque
-from typing import Dict, Any, Optional, Set
+from typing import Dict, Any, Optional, Set, Deque, Tuple
 
 from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocketDisconnect, Query
-import httpx
 
 # ─────────────────────────────────────────────────────────────────────
 # Logging (logfmt style)
@@ -22,21 +28,20 @@ _h = logging.StreamHandler()
 _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
 logger.addHandler(_h)
 
-
 def kv(**fields) -> str:
     return " ".join(f"{k}={repr(v)}" for k, v in fields.items() if v is not None)
 
-
 # ─────────────────────────────────────────────────────────────────────
-# ENV
+# ENV (no Telegram bot tokens needed)
 BOTS_JSON = os.getenv("BOTS_JSON", "[]")
-BOT_RESPONSE_TIMEOUT_SEC = int(os.getenv("BOT_RESPONSE_TIMEOUT_SEC", "5"))
+BOT_RESPONSE_TIMEOUT_SEC = int(os.getenv("BOT_RESPONSE_TIMEOUT_SEC", "8"))
+
+# WS auth for /ws/{bot_id}
 BOT_CONNECT_TOKENS_JSON = os.getenv("BOT_CONNECT_TOKENS_JSON", "{}")
 BOT_CONNECT_TOKENS_FILE = os.getenv("BOT_CONNECT_TOKENS_FILE")
 
 # ─────────────────────────────────────────────────────────────────────
 # Helpers for robust env parsing
-
 def _strip_quotes(v: Optional[str]) -> str:
     if not v:
         return ""
@@ -47,27 +52,26 @@ def _strip_quotes(v: Optional[str]) -> str:
         return s[1:-1].strip()
     return s
 
-
 def _load_json_env(name: str, default: str) -> Any:
     raw = os.getenv(name)
     if not raw:
         return json.loads(default)
     return json.loads(_strip_quotes(raw))
 
-
 # ─────────────────────────────────────────────────────────────────────
-# Parse BOTS
+# Parse BOTS (no token needed)
+# Each bot entry requires: name, path_secret
+# Optional: header_secret (X-Telegram-Bot-Api-Secret-Token), stale_seconds, allowed_chats, ws_bot_id
 try:
     RAW_BOTS = json.loads(_strip_quotes(BOTS_JSON))
 except Exception as e:
-    raise RuntimeError(f"BOTS_JSON 파싱 실패: {e}")
+    raise RuntimeError(f"BOTS_JSON parse error: {e}")
 
 BOTS: Dict[str, Dict[str, Any]] = {}
 for b in RAW_BOTS:
-    if not b.get("name") or not b.get("token") or not b.get("path_secret"):
-        raise RuntimeError("각 bot 엔트리는 name/token/path_secret 이 필요합니다.")
+    if not b.get("name") or not b.get("path_secret"):
+        raise RuntimeError("Each bot requires name and path_secret.")
     BOTS[b["name"]] = {
-        "token": b["token"],
         "path_secret": b["path_secret"],
         "header_secret": b.get("header_secret") or "",
         "stale_seconds": int(b.get("stale_seconds") or 60),
@@ -86,8 +90,7 @@ try:
     else:
         TOKENS = _load_json_env("BOT_CONNECT_TOKENS_JSON", "{}")
 except Exception as e:
-    raise RuntimeError(f"BOT_CONNECT_TOKENS 로드 실패: {e}")
-
+    raise RuntimeError(f"Failed to load WS tokens: {e}")
 
 def _expected_tokens_for(bot_id: str) -> list:
     v = TOKENS.get(bot_id)
@@ -95,14 +98,12 @@ def _expected_tokens_for(bot_id: str) -> list:
         return []
     return v if isinstance(v, list) else [v]
 
-
 # ─────────────────────────────────────────────────────────────────────
 app = FastAPI()
 
 # Dedup / stale mgmt
-_seen_ids: Dict[str, Set[int]] = defaultdict(set)  # botname -> seen update_ids
-_seen_qs: Dict[str, deque] = defaultdict(lambda: deque(maxlen=2000))
-
+_seen_ids: Dict[str, Set[int]] = defaultdict(set)          # botname -> seen update_ids
+_seen_qs: Dict[str, Deque[int]] = defaultdict(lambda: deque(maxlen=2000))
 
 def mark_seen(botname: str, uid: Optional[int]) -> bool:
     if uid is None:
@@ -113,18 +114,11 @@ def mark_seen(botname: str, uid: Optional[int]) -> bool:
     _seen_qs[botname].append(uid)
     return True
 
-
 def extract_msg(update: Dict[str, Any]) -> Dict[str, Any]:
-    return (
-        update.get("message")
-        or update.get("channel_post")
-        or update.get("edited_message")
-        or update.get("edited_channel_post")
-        or {}
-    )
+    return update.get("message") or {}
 
 
-def is_stale(botname: str, update: Dict[str, Any]) -> tuple[bool, int]:
+def is_stale(botname: str, update: Dict[str, Any]) -> Tuple[bool, int]:
     msg = extract_msg(update)
     ts = msg.get("date")
     if not ts:
@@ -132,38 +126,17 @@ def is_stale(botname: str, update: Dict[str, Any]) -> tuple[bool, int]:
     age = int(time.time() - int(ts))
     return (age > BOTS[botname]["stale_seconds"], age)
 
-
 # ─────────────────────────────────────────────────────────────────────
-# Telegram util
-async def tg_send_message(token: str, chat_id: int, text: str, reply_to_message_id: Optional[int] = None):
-    payload = {"chat_id": chat_id, "text": text}
-    if reply_to_message_id:
-        payload["reply_to_message_id"] = reply_to_message_id
-        payload["allow_sending_without_reply"] = True
-    timeout = httpx.Timeout(connect=5.0, read=10.0, write=10.0, pool=5.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.post(f"https://api.telegram.org/bot{token}/sendMessage", json=payload)
-        if r.status_code != 200:
-            logger.warning("sendMessage.error " + kv(status=r.status_code, body=r.text))
-
-
-# ─────────────────────────────────────────────────────────────────────
-# Commands
-
+# Commands: pass-through (text only)
 def parse_command(text: str) -> Optional[Dict[str, Any]]:
     if not text:
         return None
-    return {
-        "type": "TEXT_COMMAND",  # 그냥 모두 TEXT_COMMAND로 넘김
-        "raw_text": text,        # 실제 텍스트도 payload에 포함
-    }
-
+    return {"type": "TEXT_COMMAND", "raw_text": text}
 
 # ─────────────────────────────────────────────────────────────────────
 # Local WS registry
-# bot_id -> {"ws": WebSocket, "caps": set([...]), "waiters": {corr_id: {"future": fut, "token":..., "chat_id":..., "reply_to":...}}}
+# bot_id -> {"ws": WebSocket, "caps": set([...]), "waiters": {corr_id: {"future": fut}}}
 bots_ws: Dict[str, Dict[str, Any]] = {}
-
 
 def choose_bot_for(cmd: Dict[str, Any], tg_bot_name: Optional[str] = None) -> Optional[str]:
     need = cmd["type"]
@@ -179,7 +152,6 @@ def choose_bot_for(cmd: Dict[str, Any], tg_bot_name: Optional[str] = None) -> Op
             return bot_id
     return None
 
-
 # ─────────────────────────────────────────────────────────────────────
 @app.get("/healthz")
 async def healthz():
@@ -189,36 +161,6 @@ async def healthz():
         "local_ws_bots": list(bots_ws.keys()),
         "seen": {k: len(v) for k, v in _seen_ids.items()},
     }
-
-
-@app.post("/manage/register-webhooks")
-async def register_webhooks(base: str):
-    """
-    For each Telegram bot, call setWebhook:
-      url: {base}/telegram/webhook/{name}/{path_secret}
-      secret_token: header_secret (if set)
-      drop_pending_updates=True
-    """
-    results = {}
-    timeout = httpx.Timeout(connect=10.0, read=20.0, write=10.0, pool=5.0)
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        for name, cfg in BOTS.items():
-            url = f"{base.rstrip('/')}/telegram/webhook/{name}/{cfg['path_secret']}"
-            payload = {
-                "url": url,
-                "drop_pending_updates": True,
-                "allowed_updates": [
-                    "message", "edited_message", "channel_post", "edited_channel_post"
-                ],
-            }
-            if cfg["header_secret"]:
-                payload["secret_token"] = cfg["header_secret"]
-            set_r = await client.post(f"https://api.telegram.org/bot{cfg['token']}/setWebhook", json=payload)
-            info_r = await client.get(f"https://api.telegram.org/bot{cfg['token']}/getWebhookInfo")
-            results[name] = {"set_status": set_r.status_code, "set_body": set_r.text, "info": info_r.json()}
-            logger.info("register_webhook " + kv(name=name, url=url, status=set_r.status_code))
-    return results
-
 
 # ─────────────────────────────────────────────────────────────────────
 @app.post("/telegram/webhook/{name}/{secret}")
@@ -236,7 +178,7 @@ async def telegram_webhook(
         raise HTTPException(status_code=404)
     if cfg["header_secret"]:
         if not x_telegram_bot_api_secret_token or x_telegram_bot_api_secret_token != cfg["header_secret"]:
-            raise HTTPException(status_code=403, detail="Bad secret header")
+            raise HTTPException(status_code =403, detail="Bad secret header")
 
     # 2) parse update & dedup/TTL
     update = await req.json()
@@ -252,71 +194,94 @@ async def telegram_webhook(
 
     stale, age = is_stale(name, update)
     if stale and chat_id:
-        await tg_send_message(cfg["token"], chat_id, f"⏱️ 요청이 오래되어 폐기되었습니다 (age={age}s). 다시 시도해 주세요.", reply_to_message_id=message_id)
         logger.info("msg.stale " + kv(name=name, age=age))
-        return {"ok": True}
+        return {
+            "method": "sendMessage",
+            "chat_id": chat_id,
+            "text": f"⏱️ 요청이 오래되어 폐기되었습니다 (age={age}s). 다시 시도해 주세요.",
+            "reply_to_message_id": message_id,
+            "allow_sending_without_reply": True,
+        }
 
-    if not text:
+    if not text or not chat_id:
         return {"ok": True}
 
     # whitelist (optional)
     if cfg["allowed_chats"]:
-        if not chat_id or int(chat_id) not in cfg["allowed_chats"]:
+        if int(chat_id) not in cfg["allowed_chats"]:
             logger.info("chat.block " + kv(name=name, chat_id=chat_id))
             return {"ok": True}
 
     cmd = parse_command(text)
     if not cmd:
-        await tg_send_message(cfg["token"], chat_id, "❓ 지원하지 않는 명령입니다. 사용 가능: /status", reply_to_message_id=message_id)
-        return {"ok": True}
+        return {
+            "method": "sendMessage",
+            "chat_id": chat_id,
+            "text": "❓ 지원하지 않는 명령입니다.",
+            "reply_to_message_id": message_id,
+            "allow_sending_without_reply": True,
+        }
 
-    # 3) route to local WS bot
+    # 3) route to local WS bot (send only {text, tg_bot_name})
     target_bot_id = choose_bot_for(cmd, tg_bot_name=name)
     if not target_bot_id or target_bot_id not in bots_ws:
-        await tg_send_message(cfg["token"], chat_id, "🤖 처리 가능한 로컬 봇이 오프라인입니다. 잠시 후 다시 시도해 주세요.", reply_to_message_id=message_id)
         logger.info("route.offline " + kv(name=name, cmd=cmd["type"]))
-        return {"ok": True}
+        return {
+            "method": "sendMessage",
+            "chat_id": chat_id,
+            "text": "🤖 해당 로컬 봇이 오프라인입니다. 잠시 후 다시 시도해 주세요.",
+            "reply_to_message_id": message_id,
+            "allow_sending_without_reply": True,
+        }
 
     corr_id = str(uuid.uuid4())
     waiter: asyncio.Future = asyncio.get_event_loop().create_future()
-    bots_ws[target_bot_id].setdefault("waiters", {})[corr_id] = {
-        "future": waiter,
-        "token": cfg["token"],
-        "chat_id": chat_id,
-        "reply_to": message_id,
-    }
+    bots_ws[target_bot_id].setdefault("waiters", {})[corr_id] = {"future": waiter}
 
-    # dispatch
+    # dispatch to WS
     try:
         await bots_ws[target_bot_id]["ws"].send_text(json.dumps({
             "type": "task",
             "correlation_id": corr_id,
             "command": cmd["type"],
-            "payload": {"text": cmd["raw_text"]},
+            "payload": {
+                "text": cmd["raw_text"],
+                "tg_bot_name": name,  # local_ws_bridge uses this to choose local backend (8000/8001/…)
+            },
         }))
         logger.info("ws.dispatch " + kv(tg_bot=name, target=target_bot_id, cmd=cmd["type"], corr_id=corr_id))
     except Exception as e:
         bots_ws[target_bot_id]["waiters"].pop(corr_id, None)
-        await tg_send_message(cfg["token"], chat_id, f"📵 로컬 봇 전달 실패: {e}", reply_to_message_id=message_id)
         logger.warning("ws.dispatch.error " + kv(tg_bot=name, target=target_bot_id, err=str(e)))
-        return {"ok": True}
+        return {
+            "method": "sendMessage",
+            "chat_id": chat_id,
+            "text": f"📵 로컬 봇 전달 실패: {e}",
+            "reply_to_message_id": message_id,
+            "allow_sending_without_reply": True,
+        }
 
-    # await result
+    # await result and respond via webhook
     try:
         result: Dict[str, Any] = await asyncio.wait_for(waiter, timeout=BOT_RESPONSE_TIMEOUT_SEC)
-        await tg_send_message(cfg["token"], chat_id, result.get("text", "응답 형식 오류"), reply_to_message_id=message_id)
-        logger.info("ws.result " + kv(corr_id=corr_id, size=len(result.get("text", "") or "")))
+        reply_text = result.get("text", "응답 형식 오류")
+        logger.info("ws.result " + kv(corr_id=corr_id, size=len(reply_text or "")))
+        return {
+            "method": "sendMessage",
+            "chat_id": chat_id,
+            "text": reply_text,
+            "reply_to_message_id": message_id,
+            "allow_sending_without_reply": True,
+        }
     except asyncio.TimeoutError:
-        await tg_send_message(cfg["token"], chat_id, "⏳ 로컬 봇 응답이 지연됩니다. 잠시 후 다시 시도해 주세요.", reply_to_message_id=message_id)
         logger.info("ws.result.timeout " + kv(corr_id=corr_id))
+        # No delayed send (no token) → just return OK (no message)
+        return {"ok": True}
     finally:
         bots_ws[target_bot_id]["waiters"].pop(corr_id, None)
 
-    return {"ok": True}
-
-
 # ─────────────────────────────────────────────────────────────────────
-# Local bot WebSocket endpoint
+# Local bot WebSocket endpoint (authenticated by BOT_CONNECT_TOKENS)
 @app.websocket("/ws/{bot_id}")
 async def ws_bot(websocket: WebSocket, bot_id: str, token: str = Query(default="")):
     # Prefer Authorization header over query token
@@ -331,7 +296,6 @@ async def ws_bot(websocket: WebSocket, bot_id: str, token: str = Query(default="
 
     await websocket.accept()
 
-    # Expect initial hello {"type":"hello","caps":[...]} from client
     try:
         hello_raw = await websocket.receive_text()
         hello = json.loads(hello_raw)
@@ -360,12 +324,18 @@ async def ws_bot(websocket: WebSocket, bot_id: str, token: str = Query(default="
             elif msg.get("type") == "ping":
                 await websocket.send_text(json.dumps({"type": "pong"}))
 
-            # (optional) support for direct telegram send by local bot in future
+            # (optional) future extension:
             # elif msg.get("type") == "send_telegram":
-            #     await tg_send_message(info["token"], msg["chat_id"], msg["text"], reply_to_message_id=msg.get("reply_to"))
+            #     # Not supported in tokenless mode (no delayed messages)
 
     except WebSocketDisconnect:
         pass
     finally:
         bots_ws.pop(bot_id, None)
         logger.info("ws.offline " + kv(bot_id=bot_id))
+
+if __name__ == "__main__":
+
+    import uvicorn
+
+    uvicorn.run("render_app.main:app", host="127.0.0.1", port=8000 , reload=False)
