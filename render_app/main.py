@@ -98,9 +98,6 @@ for name, cfg in BOTS.items():
     if ws_id and ws_tokens:
         TOKENS.setdefault(ws_id, set()).update(ws_tokens)
 
-def _expected_tokens_for(bot_id: str) -> set[str]:
-    return TOKENS.get(bot_id, set())
-
 def _expected_tokens_for(bot_id: str) -> list:
     v = TOKENS.get(bot_id)
     if v is None:
@@ -308,6 +305,7 @@ async def telegram_webhook(
 @app.websocket("/ws/{bot_id}")
 async def ws_bot(websocket: WebSocket, bot_id: str, token: str = Query(default="")):
     # Prefer Authorization header over query token
+    print(111111111111111111)
     auth = websocket.headers.get("Authorization", "")
     provided = auth[7:] if auth.startswith("Bearer ") else token
 
