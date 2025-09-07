@@ -34,13 +34,6 @@ def kv(**fields) -> str:
 # ─────────────────────────────────────────────────────────────────────
 # ENV (no Telegram bot tokens needed)
 BOTS_JSON = os.getenv("BOTS_JSON", "[]")
-print("123123")
-print("123123")
-print("123123")
-print("123123")
-print("123123")
-print("123123")
-print(BOTS_JSON)
 BOT_RESPONSE_TIMEOUT_SEC = int(os.getenv("BOT_RESPONSE_TIMEOUT_SEC", "8"))
 
 # WS auth for /ws/{bot_id}
@@ -84,7 +77,8 @@ for b in RAW_BOTS:
         # Optional mapping: Telegram bot name -> local WS bot id
         "ws_bot_id": b.get("ws_bot_id"),
     }
-
+print(RAW_BOTS)
+print(BOTS)
 # ─────────────────────────────────────────────────────────────────────
 # Load WS connect tokens (for /ws/{bot_id})
 # Build WS tokens from BOTS_JSON
