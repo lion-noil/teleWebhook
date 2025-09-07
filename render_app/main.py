@@ -89,39 +89,17 @@ def _coerce_list(v):
         return v
     return [v]
 
-# 토큰 컨테이너는 "집합"이 가장 안전(중복 제거/멤버십 빠름)
 TOKENS: Dict[str, Set[str]] = {}
-
-
 for name, cfg in BOTS.items():
     ws_id = (cfg.get("ws_bot_id") or name).strip()
     ws_tokens = {str(t).strip() for t in _coerce_list(cfg.get("ws_token")) if str(t).strip()}
     if ws_id and ws_tokens:
         TOKENS.setdefault(ws_id, set()).update(ws_tokens)
-
 def _expected_tokens_for(bot_id: str) -> Set[str]:
     return TOKENS.get(bot_id, set())
 
-
-# Build WS tokens from BOTS_JSON ... (TOKENS 구성 코드 바로 아래)
-
-def _preview(tok: Optional[str]):
-    if not tok:
-        return None
-    s = str(tok)
-    return (s[:2] + "..." + s[-2:]) if len(s) > 4 else "***"
-
-# (선택) 부팅 시 현재 등록된 bot_id들과 토큰 개수 로그
-logger.info("ws.auth.config " + kv(
-    ids=list(TOKENS.keys()),
-    sizes={k: len(v) for k, v in TOKENS.items()},
-))
 # ─────────────────────────────────────────────────────────────────────
 app = FastAPI()
-logger.info("ws.auth.config " + kv(
-    ids=list(TOKENS.keys()),
-    sizes={k: len(v) for k, v in TOKENS.items()},
-))
 # Dedup / stale mgmt
 _seen_ids: Dict[str, Set[int]] = defaultdict(set)          # botname -> seen update_ids
 _seen_qs: Dict[str, Deque[int]] = defaultdict(lambda: deque(maxlen=2000))
@@ -311,12 +289,6 @@ async def ws_bot(websocket: WebSocket, bot_id: str, token: str = Query(default="
 
     expected = _expected_tokens_for(bot_id)  # <- set[str]
 
-    logger.info("ws.auth.check " + kv(
-        bot_id=bot_id,
-        provided_in=("header" if auth.startswith("Bearer ") else ("query" if token else "none")),
-        provided_preview=_preview(provided),
-        expect_cnt=len(expected),
-    ))
 
     if not expected or provided not in expected:
         await websocket.close(code=4401)
@@ -335,7 +307,6 @@ async def ws_bot(websocket: WebSocket, bot_id: str, token: str = Query(default="
         return
 
     bots_ws[bot_id] = {"ws": websocket, "caps": caps, "waiters": {}}
-    logger.info("ws.online " + kv(bot_id=bot_id, caps=list(caps)))
 
     try:
         while True:
