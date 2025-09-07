@@ -37,8 +37,6 @@ BOTS_JSON = os.getenv("BOTS_JSON", "[]")
 BOT_RESPONSE_TIMEOUT_SEC = int(os.getenv("BOT_RESPONSE_TIMEOUT_SEC", "8"))
 
 # WS auth for /ws/{bot_id}
-BOT_CONNECT_TOKENS_JSON = os.getenv("BOT_CONNECT_TOKENS_JSON", "{}")
-BOT_CONNECT_TOKENS_FILE = os.getenv("BOT_CONNECT_TOKENS_FILE")
 
 # ─────────────────────────────────────────────────────────────────────
 # Helpers for robust env parsing
@@ -82,15 +80,23 @@ for b in RAW_BOTS:
 
 # ─────────────────────────────────────────────────────────────────────
 # Load WS connect tokens (for /ws/{bot_id})
-TOKENS: Dict[str, Any] = {}
-try:
-    if BOT_CONNECT_TOKENS_FILE and os.path.exists(BOT_CONNECT_TOKENS_FILE):
-        with open(BOT_CONNECT_TOKENS_FILE, encoding="utf-8") as f:
-            TOKENS = json.load(f)
-    else:
-        TOKENS = _load_json_env("BOT_CONNECT_TOKENS_JSON", "{}")
-except Exception as e:
-    raise RuntimeError(f"Failed to load WS tokens: {e}")
+# Build WS tokens from BOTS_JSON
+def _coerce_list(v):
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return v
+    return [v]
+
+TOKENS: Dict[str, set] = {}
+for name, cfg in BOTS.items():
+    ws_id = cfg.get("ws_bot_id") or name
+    ws_tokens = _coerce_list(cfg.get("ws_token"))  # "qwer" or ["old","new"]
+    if ws_id and ws_tokens:
+        TOKENS.setdefault(ws_id, set()).update(ws_tokens)
+
+def _expected_tokens_for(bot_id: str) -> list:
+    return list(TOKENS.get(bot_id, set()))
 
 def _expected_tokens_for(bot_id: str) -> list:
     v = TOKENS.get(bot_id)
