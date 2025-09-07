@@ -75,10 +75,10 @@ for b in RAW_BOTS:
         "stale_seconds": int(b.get("stale_seconds") or 60),
         "allowed_chats": b.get("allowed_chats") or [],
         # Optional mapping: Telegram bot name -> local WS bot id
-        "ws_bot_id": b.get("ws_bot_id"),
+        "ws_bot_id": (b.get("ws_bot_id") or b["name"]),
+        # ✅ 여기 추가: ws_token을 그대로 넣어둔다(문자열 또는 배열)
+        "ws_token": b.get("ws_token"),
     }
-print(RAW_BOTS)
-print(BOTS)
 # ─────────────────────────────────────────────────────────────────────
 # Load WS connect tokens (for /ws/{bot_id})
 # Build WS tokens from BOTS_JSON
