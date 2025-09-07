@@ -172,9 +172,11 @@ async def telegram_webhook(
 ):
     # 1) validate bot + secrets
     if name not in BOTS:
+        print(BOTS)
         raise HTTPException(status_code=404)
     cfg = BOTS[name]
     if secret != cfg["path_secret"]:
+        print(BOTS)
         raise HTTPException(status_code=404)
     if cfg["header_secret"]:
         if not x_telegram_bot_api_secret_token or x_telegram_bot_api_secret_token != cfg["header_secret"]:
@@ -333,9 +335,3 @@ async def ws_bot(websocket: WebSocket, bot_id: str, token: str = Query(default="
     finally:
         bots_ws.pop(bot_id, None)
         logger.info("ws.offline " + kv(bot_id=bot_id))
-
-if __name__ == "__main__":
-
-    import uvicorn
-
-    uvicorn.run("render_app.main:app", host="127.0.0.1", port=8000 , reload=False)
