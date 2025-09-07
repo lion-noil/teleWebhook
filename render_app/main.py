@@ -172,11 +172,9 @@ async def telegram_webhook(
 ):
     # 1) validate bot + secrets
     if name not in BOTS:
-        print(BOTS)
         raise HTTPException(status_code=404)
     cfg = BOTS[name]
     if secret != cfg["path_secret"]:
-        print(BOTS)
         raise HTTPException(status_code=404)
     if cfg["header_secret"]:
         if not x_telegram_bot_api_secret_token or x_telegram_bot_api_secret_token != cfg["header_secret"]:
