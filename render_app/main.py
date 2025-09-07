@@ -89,7 +89,7 @@ def _coerce_list(v):
     return [v]
 
 # 토큰 컨테이너는 "집합"이 가장 안전(중복 제거/멤버십 빠름)
-TOKENS: Dict[str, set[str]] = {}
+TOKENS: Dict[str, Set[str]] = {}
 
 
 for name, cfg in BOTS.items():
@@ -98,11 +98,8 @@ for name, cfg in BOTS.items():
     if ws_id and ws_tokens:
         TOKENS.setdefault(ws_id, set()).update(ws_tokens)
 
-def _expected_tokens_for(bot_id: str) -> list:
-    v = TOKENS.get(bot_id)
-    if v is None:
-        return []
-    return v if isinstance(v, list) else [v]
+def _expected_tokens_for(bot_id: str) -> Set[str]:
+    return TOKENS.get(bot_id, set())
 
 
 # Build WS tokens from BOTS_JSON ... (TOKENS 구성 코드 바로 아래)
@@ -311,17 +308,17 @@ async def ws_bot(websocket: WebSocket, bot_id: str, token: str = Query(default="
     auth = websocket.headers.get("Authorization", "")
     provided = auth[7:] if auth.startswith("Bearer ") else token
 
-    expected_list = _expected_tokens_for(bot_id)
+    expected = _expected_tokens_for(bot_id)  # <- set[str]
+
     logger.info("ws.auth.check " + kv(
         bot_id=bot_id,
         provided_in=("header" if auth.startswith("Bearer ") else ("query" if token else "none")),
         provided_preview=_preview(provided),
-        expect_cnt=len(expected_list),
+        expect_cnt=len(expected),
     ))
 
-
-    if not expected_list or provided not in expected_list:
-        await websocket.close(code=4401)  # Unauthorized
+    if not expected or provided not in expected:
+        await websocket.close(code=4401)
         logger.warning("ws.unauthorized " + kv(bot_id=bot_id))
         return
 
