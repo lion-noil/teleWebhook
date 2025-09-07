@@ -34,6 +34,13 @@ def kv(**fields) -> str:
 # ─────────────────────────────────────────────────────────────────────
 # ENV (no Telegram bot tokens needed)
 BOTS_JSON = os.getenv("BOTS_JSON", "[]")
+print("123123")
+print("123123")
+print("123123")
+print("123123")
+print("123123")
+print("123123")
+print(BOTS_JSON)
 BOT_RESPONSE_TIMEOUT_SEC = int(os.getenv("BOT_RESPONSE_TIMEOUT_SEC", "8"))
 
 # WS auth for /ws/{bot_id}
