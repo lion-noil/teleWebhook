@@ -312,7 +312,7 @@ async def ws_bot(websocket: WebSocket, bot_id: str, token: str = Query(default="
     provided = auth[7:] if auth.startswith("Bearer ") else token
 
     expected_list = _expected_tokens_for(bot_id)
-
+    print(111111111111111111)
     logger.info("ws.auth.check " + kv(
         bot_id=bot_id,
         provided_in=("header" if auth.startswith("Bearer ") else ("query" if token else "none")),
