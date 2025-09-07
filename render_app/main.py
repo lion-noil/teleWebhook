@@ -120,7 +120,10 @@ logger.info("ws.auth.config " + kv(
 ))
 # ─────────────────────────────────────────────────────────────────────
 app = FastAPI()
-
+logger.info("ws.auth.config " + kv(
+    ids=list(TOKENS.keys()),
+    sizes={k: len(v) for k, v in TOKENS.items()},
+))
 # Dedup / stale mgmt
 _seen_ids: Dict[str, Set[int]] = defaultdict(set)          # botname -> seen update_ids
 _seen_qs: Dict[str, Deque[int]] = defaultdict(lambda: deque(maxlen=2000))
@@ -305,12 +308,10 @@ async def telegram_webhook(
 @app.websocket("/ws/{bot_id}")
 async def ws_bot(websocket: WebSocket, bot_id: str, token: str = Query(default="")):
     # Prefer Authorization header over query token
-    print(111111111111111111)
     auth = websocket.headers.get("Authorization", "")
     provided = auth[7:] if auth.startswith("Bearer ") else token
 
     expected_list = _expected_tokens_for(bot_id)
-    print(111111111111111111)
     logger.info("ws.auth.check " + kv(
         bot_id=bot_id,
         provided_in=("header" if auth.startswith("Bearer ") else ("query" if token else "none")),
