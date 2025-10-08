@@ -2,12 +2,23 @@
 fastapi>=0.110,<1.0
 uvicorn[standard]>=0.30,<1.0
 
-# 네트워킹
+# 데이터 모델(FastAPI v2 계열)
+pydantic>=2.6,<3.0
+
+# 네트워킹/클라이언트
 httpx>=0.27,<1.0
+
+# WebSocket (FastAPI의 서버용 WebSocket에 더해, 필요 시 클라이언트/유틸용)
 websockets>=12,<13
 
-# 환경변수 로딩(선택이지만 편의)
+# 환경변수 로딩
 python-dotenv>=1.0,<2.0
 
-# FastAPI v2 계열 의존
-pydantic>=2.6,<3.0
+# Redis (SSL 지원, redis-py 5.x)
+redis>=5.0,<6.0
+
+# 시간대 변환 (pytz 사용)
+pytz>=2024.1,<2026.0
+
+# 성능(선택) – FastAPI 응답 JSON 직렬화 가속
+orjson>=3.10,<4.0
