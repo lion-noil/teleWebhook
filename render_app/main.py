@@ -335,7 +335,7 @@ async def ws_bot(websocket: WebSocket, bot_id: str, token: str = Query(default="
 import json as _json
 from pytz import timezone as _tz, utc as _utc  # noqa: F401 (utc 미사용 가능)
 from datetime import datetime
-from . import redis_client  # <- 같은 패키지에 redis_client.py 위치 가정
+from render_app.redis_client import redis_client
 
 @app.get("/")
 def root():
