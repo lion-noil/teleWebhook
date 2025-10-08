@@ -336,8 +336,6 @@ import json as _json
 from pytz import timezone as _tz, utc as _utc  # noqa: F401 (utc 미사용 가능)
 from datetime import datetime
 import redis_client  # <- 같은 패키지에 redis_client.py 위치 가정
-# storage 모듈 경로는 환경에 맞게 조정 (예: from telewebhook import storage)
-from . import storage  # 같은 패키지 안에 storage.py 가 있다고 가정
 
 @app.get("/")
 def root():
@@ -435,35 +433,6 @@ def get_daily_saved_data_api(page: int = 1, per_page: int = 5):
 
     except Exception as e:
         return {"error": f"daily_saved_data 불러오는 중 오류: {str(e)}"}
-
-@app.get("/test-save")
-def test_save_endpoint():
-    now = datetime.now(_tz('Asia/Seoul'))
-    print("📈 chart data 저장 시작...")
-    stored_result = storage.fetch_and_store_chart_data()
-    print(stored_result)
-
-    print("⏰ Scheduled store running at", now.strftime("%Y-%m-%d %H:%M"))
-    youtube_result = storage.fetch_and_store_youtube_data()
-    print(youtube_result)
-    try:
-        timestamp_str = redis_client.hget("market_holidays", "all_holidays_timestamp")
-        if timestamp_str:
-            timestamp = datetime.strptime(timestamp_str.decode(), "%Y-%m-%dT%H:%M:%SZ")
-            timestamp_kst = timestamp.replace(tzinfo=_tz('UTC')).astimezone(_tz('Asia/Seoul'))
-
-            if timestamp_kst.date() == now.date():
-                print("⏭️ 오늘 이미 휴일 데이터가 저장됨. 생략합니다.")
-                return {"ok": True, "skipped": True}
-
-        # 저장 안 되어 있거나 날짜가 오늘이 아니면 실행
-        holiday_result = storage.fetch_and_store_holiday_data()
-        print(holiday_result)
-
-    except Exception as e:
-        print(f"❌ Redis에서  timestamp 확인 중 오류 발생: {str(e)}")
-
-    return {"ok": True}
 
 @app.get("/test-code")
 def test_code():
