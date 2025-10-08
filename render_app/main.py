@@ -1,9 +1,9 @@
 # telewebhook/main.py
-# Tokenless telewebhook:
-# - Receives Telegram webhook updates
-# - Forwards {text, tg_bot_name} over local WS to local_ws_bridge
-# - Returns Telegram Bot API call (sendMessage) in the webhook HTTP response (no bot token needed)
-# - WS authentication uses BOT_CONNECT_TOKENS_JSON / BOT_CONNECT_TOKENS_FILE
+# 단일 FastAPI 서비스:
+# - 기존 API(/, /youtube, /chartdata/{category}, /market-holidays, /daily-saved-data, /test-save, /test-code)
+# - Telegram 토큰리스 웹훅(/telegram/webhook/{name}/{secret})
+# - 로컬 봇 WS 엔드포인트(/ws/{bot_id})
+# - 공통 CORS/로깅/ENV 파싱
 
 import os
 import json
@@ -18,9 +18,23 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from fastapi import FastAPI, Request, HTTPException, Header, WebSocket, WebSocketDisconnect, Query
+from fastapi.middleware.cors import CORSMiddleware
 
 # ─────────────────────────────────────────────────────────────────────
-# Logging (logfmt style)
+# 앱 생성
+app = FastAPI()
+
+# CORS (필요 시 도메인 제한하세요)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ─────────────────────────────────────────────────────────────────────
+# 로깅 (logfmt style)
 logger = logging.getLogger("telewebhook")
 _level = os.getenv("LOG_LEVEL", "INFO").upper()
 logger.setLevel(getattr(logging, _level, logging.INFO))
@@ -36,8 +50,6 @@ def kv(**fields) -> str:
 BOTS_JSON = os.getenv("BOTS_JSON", "[]")
 BOT_RESPONSE_TIMEOUT_SEC = int(os.getenv("BOT_RESPONSE_TIMEOUT_SEC", "8"))
 
-# WS auth for /ws/{bot_id}
-
 # ─────────────────────────────────────────────────────────────────────
 # Helpers for robust env parsing
 def _strip_quotes(v: Optional[str]) -> str:
@@ -50,16 +62,10 @@ def _strip_quotes(v: Optional[str]) -> str:
         return s[1:-1].strip()
     return s
 
-def _load_json_env(name: str, default: str) -> Any:
-    raw = os.getenv(name)
-    if not raw:
-        return json.loads(default)
-    return json.loads(_strip_quotes(raw))
-
 # ─────────────────────────────────────────────────────────────────────
 # Parse BOTS (no token needed)
 # Each bot entry requires: name, path_secret
-# Optional: header_secret (X-Telegram-Bot-Api-Secret-Token), stale_seconds, allowed_chats, ws_bot_id
+# Optional: header_secret (X-Telegram-Bot-Api-Secret-Token), stale_seconds, allowed_chats, ws_bot_id, ws_token
 try:
     RAW_BOTS = json.loads(_strip_quotes(BOTS_JSON))
 except Exception as e:
@@ -74,12 +80,10 @@ for b in RAW_BOTS:
         "header_secret": b.get("header_secret") or "",
         "stale_seconds": int(b.get("stale_seconds") or 60),
         "allowed_chats": b.get("allowed_chats") or [],
-        # Optional mapping: Telegram bot name -> local WS bot id
         "ws_bot_id": (b.get("ws_bot_id") or b["name"]),
         "ws_token": b.get("ws_token"),
     }
-# ─────────────────────────────────────────────────────────────────────
-# Load WS connect tokens (for /ws/{bot_id})
+
 # Build WS tokens from BOTS_JSON
 def _coerce_list(v):
     if v is None:
@@ -94,12 +98,18 @@ for name, cfg in BOTS.items():
     ws_tokens = {str(t).strip() for t in _coerce_list(cfg.get("ws_token")) if str(t).strip()}
     if ws_id and ws_tokens:
         TOKENS.setdefault(ws_id, set()).update(ws_tokens)
+
 def _expected_tokens_for(bot_id: str) -> Set[str]:
     return TOKENS.get(bot_id, set())
 
 # ─────────────────────────────────────────────────────────────────────
-app = FastAPI()
-# Dedup / stale mgmt
+# 로컬 WS 레지스트리
+# bot_id -> {"ws": WebSocket, "caps": set([...]), "waiters": {corr_id: {"future": fut}}}
+bots_ws: Dict[str, Dict[str, Any]] = {}
+
+def extract_msg(update: Dict[str, Any]) -> Dict[str, Any]:
+    return update.get("message") or {}
+
 _seen_ids: Dict[str, Set[int]] = defaultdict(set)          # botname -> seen update_ids
 _seen_qs: Dict[str, Deque[int]] = defaultdict(lambda: deque(maxlen=2000))
 
@@ -112,10 +122,6 @@ def mark_seen(botname: str, uid: Optional[int]) -> bool:
     _seen_qs[botname].append(uid)
     return True
 
-def extract_msg(update: Dict[str, Any]) -> Dict[str, Any]:
-    return update.get("message") or {}
-
-
 def is_stale(botname: str, update: Dict[str, Any]) -> Tuple[bool, int]:
     msg = extract_msg(update)
     ts = msg.get("date")
@@ -124,17 +130,10 @@ def is_stale(botname: str, update: Dict[str, Any]) -> Tuple[bool, int]:
     age = int(time.time() - int(ts))
     return (age > BOTS[botname]["stale_seconds"], age)
 
-# ─────────────────────────────────────────────────────────────────────
-# Commands: pass-through (text only)
 def parse_command(text: str) -> Optional[Dict[str, Any]]:
     if not text:
         return None
     return {"type": "TEXT_COMMAND", "raw_text": text}
-
-# ─────────────────────────────────────────────────────────────────────
-# Local WS registry
-# bot_id -> {"ws": WebSocket, "caps": set([...]), "waiters": {corr_id: {"future": fut}}}
-bots_ws: Dict[str, Dict[str, Any]] = {}
 
 def choose_bot_for(cmd: Dict[str, Any], tg_bot_name: Optional[str] = None) -> Optional[str]:
     need = cmd["type"]
@@ -151,6 +150,7 @@ def choose_bot_for(cmd: Dict[str, Any], tg_bot_name: Optional[str] = None) -> Op
     return None
 
 # ─────────────────────────────────────────────────────────────────────
+# 상태 체크
 @app.get("/healthz")
 async def healthz():
     return {
@@ -161,6 +161,7 @@ async def healthz():
     }
 
 # ─────────────────────────────────────────────────────────────────────
+# Telegram 토큰리스 웹훅
 @app.post("/telegram/webhook/{name}/{secret}")
 async def telegram_webhook(
     name: str,
@@ -279,7 +280,7 @@ async def telegram_webhook(
         bots_ws[target_bot_id]["waiters"].pop(corr_id, None)
 
 # ─────────────────────────────────────────────────────────────────────
-# Local bot WebSocket endpoint (authenticated by BOT_CONNECT_TOKENS)
+# Local bot WebSocket endpoint (authenticated)
 @app.websocket("/ws/{bot_id}")
 async def ws_bot(websocket: WebSocket, bot_id: str, token: str = Query(default="")):
     # Prefer Authorization header over query token
@@ -287,8 +288,6 @@ async def ws_bot(websocket: WebSocket, bot_id: str, token: str = Query(default="
     provided = auth[7:] if auth.startswith("Bearer ") else token
 
     expected = _expected_tokens_for(bot_id)  # <- set[str]
-
-
     if not expected or provided not in expected:
         await websocket.close(code=4401)
         logger.warning("ws.unauthorized " + kv(bot_id=bot_id))
@@ -306,6 +305,7 @@ async def ws_bot(websocket: WebSocket, bot_id: str, token: str = Query(default="
         return
 
     bots_ws[bot_id] = {"ws": websocket, "caps": caps, "waiters": {}}
+    logger.info("ws.online " + kv(bot_id=bot_id, caps=list(caps)))
 
     try:
         while True:
@@ -323,12 +323,148 @@ async def ws_bot(websocket: WebSocket, bot_id: str, token: str = Query(default="
             elif msg.get("type") == "ping":
                 await websocket.send_text(json.dumps({"type": "pong"}))
 
-            # (optional) future extension:
-            # elif msg.get("type") == "send_telegram":
-            #     # Not supported in tokenless mode (no delayed messages)
-
     except WebSocketDisconnect:
         pass
     finally:
         bots_ws.pop(bot_id, None)
         logger.info("ws.offline " + kv(bot_id=bot_id))
+
+# ─────────────────────────────────────────────────────────────────────
+# ↓↓↓ 여기부터 기존 Redis/데이터 API 합침 ↓↓↓
+
+import json as _json
+from pytz import timezone as _tz, utc as _utc  # noqa: F401 (utc 미사용 가능)
+from datetime import datetime
+from telewebhook.redis_client import redis_client  # <- 같은 패키지에 redis_client.py 위치 가정
+# storage 모듈 경로는 환경에 맞게 조정 (예: from telewebhook import storage)
+from . import storage  # 같은 패키지 안에 storage.py 가 있다고 가정
+
+@app.get("/")
+def root():
+    return {"message": "Hello, World!"}
+
+@app.head("/")
+def head_root():
+    return {}
+
+@app.get("/youtube")
+def youtube_data():
+    result = {}
+    all_data = redis_client.hgetall("youtube_data")
+
+    for country_bytes, raw_data_bytes in all_data.items():
+        country = country_bytes.decode()
+        try:
+            raw_data = raw_data_bytes.decode()
+            data = _json.loads(raw_data)
+            result[country] = data
+
+        except Exception as e:
+            result[country] = {"error": f"{country} 처리 중 오류: {str(e)}"}
+    return result
+
+@app.get("/chartdata/{category}")
+def get_chart_data(category: str):
+    try:
+        redis_key = "chart_data"  # HSET으로 저장된 hash key
+        result = redis_client.hget(redis_key, category)
+
+        if result:
+            return _json.loads(result)  # JSON 파싱해서 dict 반환
+        else:
+            return {"error": f"'{category}'에 해당하는 데이터가 없습니다."}
+
+    except Exception as e:
+        return {"error": f"데이터 가져오기 실패: {str(e)}"}
+
+@app.get("/market-holidays")
+def get_market_holidays_api():
+    result = {}
+    try:
+        all_data_raw = redis_client.hget("market_holidays", "all_holidays")
+        timestamp_raw = redis_client.hget("market_holidays", "all_holidays_timestamp")
+
+        if not all_data_raw or not timestamp_raw:
+            result["error"] = "공휴일 데이터가 존재하지 않거나, 시간 정보가 없습니다."
+            return result
+
+        all_data = _json.loads(all_data_raw.decode())
+        timestamp = timestamp_raw.decode()
+
+        result["holidays"] = all_data
+        result["timestamp"] = timestamp
+
+        return result
+    except Exception as e:
+        result["error"] = f"공휴일 데이터를 가져오는 중 오류가 발생했습니다: {str(e)}"
+        return result
+
+@app.get("/daily-saved-data")
+def get_daily_saved_data_api(page: int = 1, per_page: int = 5):
+    try:
+        all_dates = redis_client.hkeys("daily_saved_data")
+        if not all_dates:
+            return {"error": "저장된 daily_saved_data가 없습니다."}
+
+        sorted_dates = sorted(all_dates, reverse=True)
+        total = len(sorted_dates)
+
+        start = (page - 1) * per_page
+        end = start + per_page
+        page_keys = sorted_dates[start:end]
+
+        page_values = redis_client.hmget("daily_saved_data", page_keys)
+
+        data = []
+        for date, value in zip(page_keys, page_values):
+            try:
+                parsed = _json.loads(value)
+            except Exception:
+                parsed = {"error": "데이터 파싱 실패"}
+            data.append({
+                "date": date,
+                "data": parsed
+            })
+
+        return {
+            "total": total,
+            "page": page,
+            "perPage": per_page,
+            "data": data
+        }
+
+    except Exception as e:
+        return {"error": f"daily_saved_data 불러오는 중 오류: {str(e)}"}
+
+@app.get("/test-save")
+def test_save_endpoint():
+    now = datetime.now(_tz('Asia/Seoul'))
+    print("📈 chart data 저장 시작...")
+    stored_result = storage.fetch_and_store_chart_data()
+    print(stored_result)
+
+    print("⏰ Scheduled store running at", now.strftime("%Y-%m-%d %H:%M"))
+    youtube_result = storage.fetch_and_store_youtube_data()
+    print(youtube_result)
+    try:
+        timestamp_str = redis_client.hget("market_holidays", "all_holidays_timestamp")
+        if timestamp_str:
+            timestamp = datetime.strptime(timestamp_str.decode(), "%Y-%m-%dT%H:%M:%SZ")
+            timestamp_kst = timestamp.replace(tzinfo=_tz('UTC')).astimezone(_tz('Asia/Seoul'))
+
+            if timestamp_kst.date() == now.date():
+                print("⏭️ 오늘 이미 휴일 데이터가 저장됨. 생략합니다.")
+                return {"ok": True, "skipped": True}
+
+        # 저장 안 되어 있거나 날짜가 오늘이 아니면 실행
+        holiday_result = storage.fetch_and_store_holiday_data()
+        print(holiday_result)
+
+    except Exception as e:
+        print(f"❌ Redis에서  timestamp 확인 중 오류 발생: {str(e)}")
+
+    return {"ok": True}
+
+@app.get("/test-code")
+def test_code():
+    return "test code실행"
