@@ -335,7 +335,7 @@ async def ws_bot(websocket: WebSocket, bot_id: str, token: str = Query(default="
 import json as _json
 from pytz import timezone as _tz, utc as _utc  # noqa: F401 (utc 미사용 가능)
 from datetime import datetime
-from telewebhook.redis_client import redis_client  # <- 같은 패키지에 redis_client.py 위치 가정
+import redis_client  # <- 같은 패키지에 redis_client.py 위치 가정
 # storage 모듈 경로는 환경에 맞게 조정 (예: from telewebhook import storage)
 from . import storage  # 같은 패키지 안에 storage.py 가 있다고 가정
 
